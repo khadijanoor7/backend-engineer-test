@@ -1,64 +1,82 @@
-import Fastify from 'fastify';
-import { Pool } from 'pg';
-import { randomUUID } from 'crypto';
+import Fastify from "fastify";
+import { Pool } from "pg";
 
 const fastify = Fastify({ logger: true });
 
-fastify.get('/', async (request, reply) => {
-  return { hello: 'world' };
+fastify.get("/", async (request, reply) => {
+  return { hello: "world" };
 });
 
-async function testPostgres(pool: Pool) {
-  const id = randomUUID();
-  const name = 'Satoshi';
-  const email = 'Nakamoto';
-
-  await pool.query(`DELETE FROM users;`);
-
+async function createTables(pool: Pool) {
+  // Create blocks table
   await pool.query(`
-    INSERT INTO users (id, name, email)
-    VALUES ($1, $2, $3);
-  `, [id, name, email]);
-
-  const { rows } = await pool.query(`
-    SELECT * FROM users;
+    CREATE TABLE IF NOT EXISTS blocks (
+      id TEXT PRIMARY KEY,
+      height INTEGER UNIQUE NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
-  console.log('USERS', rows);
-}
-
-async function createTables(pool: Pool) {
+  // Create transactions table
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL
+      block_id TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE
+    );
+  `);
+
+  // Create outputs table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS outputs (
+      id SERIAL PRIMARY KEY,
+      tx_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+      output_index INTEGER NOT NULL,
+      address TEXT NOT NULL,
+      value INTEGER NOT NULL,
+      spent BOOLEAN DEFAULT FALSE
+    );
+  `);
+
+  // Create inputs table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS inputs (
+      id SERIAL PRIMARY KEY,
+      tx_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+      referenced_tx_id TEXT NOT NULL,
+      referenced_output_index INTEGER NOT NULL
+    );
+  `);
+
+  // Create balances table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS balances (
+      address TEXT PRIMARY KEY,
+      balance INTEGER NOT NULL
     );
   `);
 }
 
 async function bootstrap() {
-  console.log('Bootstrapping...');
+  console.log("Bootstrapping...");
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    throw new Error('DATABASE_URL is required');
+    throw new Error("DATABASE_URL is required");
   }
 
   const pool = new Pool({
-    connectionString: databaseUrl
+    connectionString: databaseUrl,
   });
 
   await createTables(pool);
-  await testPostgres(pool);
 }
 
 try {
   await bootstrap();
   await fastify.listen({
     port: 3000,
-    host: '0.0.0.0'
-  })
+    host: "0.0.0.0",
+  });
 } catch (err) {
-  fastify.log.error(err)
-  process.exit(1)
-};
+  fastify.log.error(err);
+  process.exit(1);
+}
