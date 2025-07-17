@@ -131,6 +131,70 @@ fastify.post("/blocks", async (request, reply) => {
   }
 });
 
+fastify.post("/rollback", async (request, reply) => {
+  const pool =
+    fastify.pgPool || new Pool({ connectionString: process.env.DATABASE_URL });
+  const height = parseInt(request.query.height, 10);
+  if (isNaN(height)) {
+    return reply.status(400).send({ error: "Invalid height" });
+  }
+  try {
+    await pool.query("BEGIN");
+    // Delete blocks above the given height (cascade deletes txs, outputs, inputs)
+    await pool.query("DELETE FROM blocks WHERE height > $1", [height]);
+    // Reset all outputs to unspent
+    await pool.query("UPDATE outputs SET spent = FALSE");
+    // Mark as spent only those outputs that are referenced by inputs in the remaining transactions
+    await pool.query(`
+      UPDATE outputs o
+      SET spent = TRUE
+      FROM inputs i
+      WHERE o.tx_id = i.referenced_tx_id AND o.output_index = i.referenced_output_index
+    `);
+    // Recalculate balances
+    await pool.query("UPDATE balances SET balance = 0");
+    const { rows: outputs } = await pool.query(
+      "SELECT address, value, spent FROM outputs"
+    );
+    for (const output of outputs) {
+      if (!output.spent) {
+        await pool.query(
+          "UPDATE balances SET balance = balance + $1 WHERE address = $2",
+          [output.value, output.address]
+        );
+      }
+    }
+    await pool.query("COMMIT");
+    return reply.status(200).send({ success: true });
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    return reply.status(400).send({ error: err.message });
+  }
+});
+
+fastify.get("/balance/:address", async (request, reply) => {
+  const pool =
+    fastify.pgPool || new Pool({ connectionString: process.env.DATABASE_URL });
+  const { address } = request.params;
+  const { rows } = await pool.query(
+    "SELECT balance FROM balances WHERE address = $1",
+    [address]
+  );
+  if (!rows.length) {
+    return reply.status(200).send({ address, balance: 0 });
+  }
+  return reply.status(200).send({ address, balance: rows[0].balance });
+});
+
+fastify.post("/test/reset", async (request, reply) => {
+  const pool =
+    fastify.pgPool || new Pool({ connectionString: process.env.DATABASE_URL });
+  await pool.query(
+    "TRUNCATE blocks, transactions, outputs, inputs, balances RESTART IDENTITY CASCADE"
+  );
+  return reply.status(200).send({ success: true });
+});
+
 async function createTables(pool: Pool) {
   // Create blocks table
   await pool.query(`
